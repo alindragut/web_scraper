@@ -1,0 +1,73 @@
+x-base-service: &base-service
+  build: .
+  environment: &base-environment
+    KAFKA_BROKER_URL: kafka:${KAFKA_INTERNAL_PORT}
+    KAFKA_URLS_TOPIC: ${KAFKA_URLS_TOPIC}
+    KAFKA_HTMLS_TOPIC: ${KAFKA_HTMLS_TOPIC}
+    KAFKA_EXTRACTED_DATA_TOPIC: ${KAFKA_EXTRACTED_DATA_TOPIC}
+    KAFKA_LOGS_TOPIC: ${KAFKA_LOGS_TOPIC}
+
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+  
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on: 
+      - zookeeper
+    ports:
+      - "${KAFKA_HOST_PORT}:${KAFKA_HOST_PORT}"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENERS: PLAINTEXT://:29092,EXTERNAL://:${KAFKA_HOST_PORT}
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:${KAFKA_INTERNAL_PORT},EXTERNAL://localhost:${KAFKA_HOST_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CREATE_TOPICS: "${KAFKA_URLS_TOPIC}:1:1,${KAFKA_HTMLS_TOPIC}:1:1,${KAFKA_EXTRACTED_DATA_TOPIC}:1:1,${KAFKA_LOGS_TOPIC}:1:1"
+    healthcheck:
+      test: ["CMD", "cub", "kafka-ready", "-b", "localhost:29092", "1", "1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  logger:
+    <<: *base-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "false" # logger should not log to kafka
+    command: python -m services.logging_service
+  
+  fetcher:
+    <<: *base-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      logger:
+        condition: service_started
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "true"
+    command: python -m services.fetcher_service
+    # To scale, you would use 'docker-compose up --scale fetcher=5'
+
+  url_producer:
+    <<: *base-service
+    restart: no
+    depends_on:
+      kafka:
+        condition: service_healthy
+      logger:
+        condition: service_started
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "true"
+    command: python -m run_url_producer

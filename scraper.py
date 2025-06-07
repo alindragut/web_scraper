@@ -1,5 +1,5 @@
-import cProfile
-import requests
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
 import re
 import csv
@@ -22,7 +22,6 @@ class Record:
     instagram_links: List[str] = field(default_factory=list)
     youtube_links: List[str] = field(default_factory=list)
     addresses: List[str] = field(default_factory=list)
-    error: Optional[str] = None
 
     def to_dict(self) -> Dict:
         """Converts the Record object to a dictionary."""
@@ -34,10 +33,10 @@ class Record:
         return [f.name for f in dataclass_fields(cls)]
 
     @classmethod
-    def create_error_record(cls, url: str, error_message: str) -> 'Record':
+    def create_error_record(cls, url: str) -> 'Record':
         """Creates a Record instance populated only with URL and error."""
         # Dataclass default_factory will handle empty lists for other fields
-        return cls(url=url, error=error_message)
+        return cls(url=url)
 
 
 # --- HTML Data Extractor Class ---
@@ -172,43 +171,65 @@ class HtmlDataExtractor:
                 url=url,
                 phone_numbers=phones,
                 addresses=addresses,
-                error=None,
                 **social_media_dict # This maps "facebook_links": [...] to the Record field
             )
         except Exception as e:
             print(f"Error during data extraction by HtmlDataExtractor for {url}: {e}")
             # import traceback; traceback.print_exc() # For debugging
-            return Record.create_error_record(url, f"Extraction error: {e}")
-
-
-# --- Web Fetcher Class ---
+            return Record(url=url)
+    
+# --- Web Fetcher Class (Refactored for asyncio) ---
 class WebFetcher:
     """
-    Responsible for fetching and performing initial parsing of web page content.
+    Responsible for fetching and performing initial parsing of web page content asynchronously.
     """
-    DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
+    DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
     def __init__(self, user_agent: Optional[str] = None, request_timeout: int = 15):
         self.user_agent = user_agent or self.DEFAULT_USER_AGENT
         self.request_timeout = request_timeout
-        self.session = requests.Session()
-        self.session.headers.update({'User-Agent': self.user_agent})
+        self._session: Optional[aiohttp.ClientSession] = None
 
-    def fetch_page_content(self, url: str) -> Tuple[Optional[BeautifulSoup], Optional[str], Optional[str]]:
-        """ Fetches page, returns (soup, page_text, error_message_or_None) """
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Creates or returns an existing aiohttp.ClientSession."""
+        if self._session is None or self._session.closed:
+            headers = {'User-Agent': self.user_agent}
+            timeout = aiohttp.ClientTimeout(total=self.request_timeout)
+            # For SSL issues on some sites, connector might be needed:
+            # connector = aiohttp.TCPConnector(ssl=False) # Use with caution
+            self._session = aiohttp.ClientSession(headers=headers, timeout=timeout) #, connector=connector)
+        return self._session
+
+    async def close_session(self):
+        """Closes the aiohttp.ClientSession if it exists and is open."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    async def fetch_page_content_async(self, url: str) -> Tuple[Optional[BeautifulSoup], Optional[str], Optional[str]]:
+        """ Fetches page asynchronously, returns (soup, page_text, error_message_or_None) """
+        session = await self._get_session()
+        html_content: Optional[bytes] = None
         try:
-            response = self.session.get(url, timeout=self.request_timeout)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            return None, None, str(e)
-        
-        content_type = response.headers.get('content-type', '').lower()
-        if 'text/html' not in content_type:
-            return None, None, f"Skipping {url}, not HTML content (type: {content_type})"
-        
+            async with session.get(url) as response:
+                response.raise_for_status() # Raises ClientResponseError for 4xx/5xx
+                content_type_header = response.headers.get('Content-Type', '').lower()
+                if 'text/html' not in content_type_header:
+                    return None, None, f"Skipping {url}, not HTML (type: {content_type_header})"
+                html_content = await response.read()
+        except aiohttp.ClientError as e:
+            return None, None, f"AIOHTTP ClientError for {url}: {type(e).__name__} - {e}"
+        except asyncio.TimeoutError:
+            return None, None, f"Request to {url} timed out after {self.request_timeout}s"
+        except Exception as e: # Catch-all for other unexpected errors during fetch
+            return None, None, f"Unexpected fetch error for {url}: {type(e).__name__} - {e}"
+
+        if html_content is None: # Should be caught by exceptions, but as a safeguard
+             return None, None, f"No content fetched for {url}"
+
         try:
-            soup = BeautifulSoup(response.content, 'html.parser')
-        except Exception as e:
+            soup = BeautifulSoup(html_content, 'html.parser')
+        except Exception as e: # Error during parsing
             return None, None, f"Error parsing HTML for {url}: {e}"
         
         for script_or_style in soup(["script", "style"]):
@@ -216,17 +237,20 @@ class WebFetcher:
         page_text = ' '.join(soup.stripped_strings)
         return soup, page_text, None
 
-# --- Orchestrator Class ---
+
+# --- Orchestrator Class (Modified for asyncio) ---
 class Orchestrator:
     """
     Manages the end-to-end workflow: reading URLs, fetching, extracting, and saving data.
+    Uses asynchronous operations for fetching.
     """
-    def __init__(self, input_csv_file: str, output_data_file: str):
+    def __init__(self, input_csv_file: str, output_data_file: str, concurrent_requests: int = 10):
         self.input_csv_file = input_csv_file
         self.output_data_file = output_data_file
-        self.web_fetcher = WebFetcher()
+        self.web_fetcher = WebFetcher() # Use the refactored WebFetcher
         self.html_extractor = HtmlDataExtractor()
         self.scraped_results: List[Dict] = []
+        self.concurrent_requests = concurrent_requests
 
     def _prepare_url(self, url_input: str) -> str:
         url_input = url_input.strip()
@@ -235,27 +259,31 @@ class Orchestrator:
             return 'http://' + url_input
         return url_input
 
-    def process_single_url(self, url_to_scrape: str) -> Record:
-        print(f"Processing: {url_to_scrape}")
-        soup, page_text, fetch_error = self.web_fetcher.fetch_page_content(url_to_scrape)
+    async def _process_single_url_async(self, url_to_scrape: str, semaphore: asyncio.Semaphore) -> Record:
+        async with semaphore: # Control concurrency
+            print(f"Processing: {url_to_scrape}") 
+            soup, page_text, fetch_error = await self.web_fetcher.fetch_page_content_async(url_to_scrape)
 
-        if fetch_error:
-            print(f"Fetch/Parse error for {url_to_scrape}: {fetch_error}")
-            return Record.create_error_record(url_to_scrape, fetch_error)
-        
-        if soup is None or page_text is None: # Should be covered by fetch_error
-            error_msg = "Failed to retrieve or parse page content correctly (soup or text is None)."
-            print(f"Content error for {url_to_scrape}: {error_msg}")
-            return Record.create_error_record(url_to_scrape, error_msg)
+            if fetch_error:
+                return Record.create_error_record(url_to_scrape)
+            
+            if soup is None or page_text is None: 
+                # This case should ideally be covered by fetch_error returning a message
+                error_msg = "Content missing post-fetch (soup or text is None)."
+                return Record.create_error_record(url_to_scrape)
 
-        return self.html_extractor.extract_all_data(url_to_scrape, soup, page_text)
+            return self.html_extractor.extract_all_data(url_to_scrape, soup, page_text)
 
-    def run(self):
+    async def _run_async_core(self):
+        """Core asynchronous processing logic."""
         print(f"Reading websites from: {self.input_csv_file}")
+        # Store (original_row_num, url) for better error context later
+        urls_to_process: List[Tuple[int, str]] = [] 
+        
         try:
             with open(self.input_csv_file, 'r', newline='', encoding='utf-8') as csvfile:
                 reader = csv.DictReader(csvfile)
-                if "domain" not in reader.fieldnames:
+                if "domain" not in (reader.fieldnames or []): # Handle empty or malformed CSV
                     print(f"Error: CSV file '{self.input_csv_file}' must contain a 'domain' column.")
                     return
 
@@ -263,58 +291,105 @@ class Orchestrator:
                     raw_url = row.get("domain", "")
                     url_to_scrape = self._prepare_url(raw_url)
                     if not url_to_scrape:
-                        print(f"Skipping empty URL in CSV at row {row_num}.")
+                        # Create an error record for empty URLs to ensure they are in the output
+                        error_rec = Record.create_error_record(f"CSV Row {row_num}")
+                        self.scraped_results.append(error_rec.to_dict())
+                        print(f"Skipping empty URL in CSV at row {row_num}. Logged as error.")
                         continue
-                    
-                    record_instance = self.process_single_url(url_to_scrape)
-                    self.scraped_results.append(record_instance.to_dict())
-                    
-                    # Console Output
-                    data_dict = record_instance.to_dict()
-                    error_msg = f"Error: {data_dict['error']}" if data_dict['error'] else "OK"
-                    social_summary = []
-                    for f_name in Record.get_field_names():
-                        if "_links" in f_name and f_name != "social_media_links": # general field no longer exists
-                           social_summary.append(f"{f_name.replace('_links','').capitalize()}: {len(data_dict.get(f_name,[]))}")
-                    
-                    print(f"Data for {data_dict['url']}: Phones: {len(data_dict.get('phone_numbers',[]))}, "
-                          f"Social: {{ {', '.join(social_summary)} }}, "
-                          f"Addresses: {len(data_dict.get('addresses',[]))}, Status: {error_msg}")
-                    print("-" * 30)
-
+                    urls_to_process.append((row_num, url_to_scrape))
+        
         except FileNotFoundError:
             print(f"Error: Input file '{self.input_csv_file}' not found.")
             return
         except Exception as e:
-            print(f"An unexpected error occurred during CSV processing or main loop: {e}")
+            print(f"An unexpected error occurred during CSV reading: {e}")
             import traceback; traceback.print_exc()
             return
+        
+        if not urls_to_process and not self.scraped_results: # No valid URLs and no prior errors like empty rows
+            print("No valid URLs found in the CSV to process.")
+            self._save_results() # Save to write empty file or file with just empty URL errors
+            return
+
+        semaphore = asyncio.Semaphore(self.concurrent_requests)
+        tasks = [self._process_single_url_async(url, semaphore) for _, url in urls_to_process]
+            
+        if tasks:
+            print(f"\nStarting to process {len(tasks)} URLs with up to {self.concurrent_requests} concurrent requests...")
+            results_or_exceptions = await asyncio.gather(*tasks, return_exceptions=True)
+            print("\n--- Processing Complete ---")
+
+            for i, res_or_exc in enumerate(results_or_exceptions):
+                original_row_num, url = urls_to_process[i]
+                record_instance: Record
+                if isinstance(res_or_exc, Exception):
+                    print(f"Unhandled exception for URL (row {original_row_num}) {url}: {res_or_exc}")
+                    record_instance = Record.create_error_record(url)
+                else:
+                    record_instance = res_or_exc
+                self.scraped_results.append(record_instance.to_dict())
+                
+                # Console Output for each processed record
+                data_dict = record_instance.to_dict()
+                social_summary = []
+                for f_name in Record.get_field_names():
+                    if "_links" in f_name and isinstance(data_dict.get(f_name), list):
+                        social_summary.append(f"{f_name.replace('_links','').replace('_',' ').capitalize()}: {len(data_dict.get(f_name,[]))}")
+                
+                print(f"Result for {data_dict['url']} (CSV row {original_row_num}):\n"
+                      f"  Phones: {len(data_dict.get('phone_numbers',[]))}, "
+                      f"Social: {{ {', '.join(social_summary)} }}, "
+                      f"Addresses: {len(data_dict.get('addresses',[]))}")
+                print("-" * 40)
+        else: # Only empty URL errors were found
+            print("\nNo valid URLs to fetch. Proceeding to save results (likely only CSV parse errors).")
 
         self._save_results()
 
+    async def run_async_with_cleanup(self):
+        """Wraps _run_async_core with a finally block for session cleanup."""
+        try:
+            await self._run_async_core()
+        except Exception as e: # Catch-all for truly unexpected issues in orchestration
+            print(f"A critical error occurred in the async orchestrator: {e}")
+            import traceback; traceback.print_exc()
+        finally:
+            if hasattr(self.web_fetcher, 'close_session'):
+                # print("Ensuring WebFetcher session is closed...") # Optional debug print
+                await self.web_fetcher.close_session()
+                # print("WebFetcher session closed.") # Optional debug print
+
+    def run(self): # Synchronous wrapper to run the async orchestrator
+        try:
+            asyncio.run(self.run_async_with_cleanup())
+        except KeyboardInterrupt:
+            print("\nProcess interrupted by user. Shutting down.")
+        except Exception as e: # To catch issues if asyncio.run() itself fails
+            print(f"Critical error launching orchestrator: {e}")
+            import traceback; traceback.print_exc()
+
     def _save_results(self):
-        print(f"\nSaving all scraped data to {self.output_data_file}...")
+        print(f"\nSaving all collected data to {self.output_data_file}...")
         if not self.scraped_results:
-            print("No data was successfully scraped or collected.")
+            print("No data (including errors) was collected to save.")
+            # Optionally create an empty file with headers
+            # with open(self.output_data_file, 'w', newline='', encoding='utf-8') as outfile:
+            #    writer = csv.DictWriter(outfile, fieldnames=Record.get_field_names())
+            #    writer.writeheader()
+            # print(f"Empty results file with headers created: {self.output_data_file}")
             return
 
-        fieldnames = Record.get_field_names() # Get field names directly from Record class
+        fieldnames = Record.get_field_names()
         try:
             with open(self.output_data_file, 'w', newline='', encoding='utf-8') as outfile:
                 writer = csv.DictWriter(outfile, fieldnames=fieldnames)
                 writer.writeheader()
                 for row_data_dict in self.scraped_results:
-                    # Prepare for CSV: join lists into strings
                     csv_ready_row = {}
                     for key, value in row_data_dict.items():
-                        if isinstance(value, list):
-                            csv_ready_row[key] = '; '.join(value)
-                        elif value is None: # Ensure None errors are empty strings
-                             csv_ready_row[key] = ''
-                        else:
-                            csv_ready_row[key] = str(value)
+                        csv_ready_row[key] = '; '.join(value) if isinstance(value, list) else ('' if value is None else str(value))
                     writer.writerow(csv_ready_row)
-            print(f"Successfully saved data for {len(self.scraped_results)} websites to {self.output_data_file}")
+            print(f"Successfully saved data for {len(self.scraped_results)} entries to {self.output_data_file}")
         except IOError as e:
             print(f"Error writing to output file '{self.output_data_file}': {e}")
         except Exception as e:
@@ -325,7 +400,7 @@ class Orchestrator:
 # --- Main Execution ---
 if __name__ == "__main__":
     input_file = 'sample-websites.csv' 
-    output_file = 'scraped_company_data_new.csv' # New version
+    output_file = 'scraped_company_data_async_100_robot.csv' # New version
     
-    orchestrator = Orchestrator(input_csv_file=input_file, output_data_file=output_file)
+    orchestrator = Orchestrator(input_csv_file=input_file, output_data_file=output_file, concurrent_requests=100)
     orchestrator.run()
