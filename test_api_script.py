@@ -65,8 +65,6 @@ def run_api_tests():
                 except requests.exceptions.RequestException as e:
                     failed_matches += 1
                     log.critical(f"Could not connect to the API. {e}")
-                
-                time.sleep(0.1)
 
     except FileNotFoundError:
         log.critical(f"The input file '{INPUT_CSV_FILE}' was not found.")

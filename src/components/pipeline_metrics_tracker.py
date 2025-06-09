@@ -14,7 +14,6 @@ class PipelineMetricsTracker:
         self.fetched_urls = set()
         
         # For Fill Rates
-        self.total_records_processed = 0
         self.fields_to_check = ['phone_numbers', 'social_media_links', 'addresses']
         self.field_counts = Counter()
 
@@ -44,7 +43,6 @@ class PipelineMetricsTracker:
 
     def process_extracted_data(self, record: dict):
         """Processes a single company record."""
-        self.total_records_processed += 1
         for field in self.fields_to_check:
             value = record.get(field)
             if value:
@@ -59,10 +57,10 @@ class PipelineMetricsTracker:
         
         # Fill Rates
         fill_rates = {}
-        if self.total_records_processed > 0:
+        if total_produced > 0:
             for field in self.fields_to_check:
                 count = self.field_counts.get(field, 0)
-                fill_rate_percent = (count / self.total_records_processed * 100)
+                fill_rate_percent = (count / total_produced * 100)
                 fill_rates[field] = {
                     "count": count,
                     "fill_rate_percent": round(fill_rate_percent, 2)
@@ -77,7 +75,7 @@ class PipelineMetricsTracker:
                 "coverage_percent": round(coverage_percent, 2)
             },
             "fill_rates": {
-                "total_records_processed": self.total_records_processed,
+                "total_records_processed": total_produced,
                 "fields": fill_rates
             }
         }

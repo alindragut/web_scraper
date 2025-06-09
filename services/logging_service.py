@@ -14,7 +14,7 @@ def main():
     Consumes log messages from the 'log_events' topic and prints them.
     This is the final destination for (almost) all logs in the system.
     """
-    log.info("Starting Logging Service...")
+    log.info("Starting Logging Service")
     
     log_file_writer = setup_log_file_writer()
     
@@ -27,7 +27,7 @@ def main():
         log.critical("Could not create Kafka consumer. Shutting down.", exc_info=True)
         return
 
-    log.info(f"Listening for messages on topic '{config.TOPIC_LOG_EVENTS}'...")
+    log.info(f"Listening for messages on topic '{config.TOPIC_LOG_EVENTS}'")
 
     try:
         while True:

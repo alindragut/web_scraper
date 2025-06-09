@@ -1,27 +1,19 @@
 import csv
-import re
 import logging
 import json
 
 from src.utils.logging_setup import setup_app_logging
 setup_app_logging("URLProducer")
 
-from src.utils import config, kafka_utils
+from src.utils import config
+from src.utils import kafka_utils
+from src.utils import normalization_utils
 
 log = logging.getLogger("URLProducer")
 
-def _prepare_url(url_input: str) -> str:
-    """Prepares and normalizes a URL from input."""
-    url_input = url_input.strip()
-    if not url_input:
-        return ""
-    if not re.match(r'^[a-zA-Z]+://', url_input):
-        return 'http://' + url_input
-    return url_input
-
 def main():
     """Main function to produce URLs to Kafka from a CSV."""
-    log.info("Starting URL Producer...")
+    log.info("Starting URL Producer")
     try:
         producer = kafka_utils.get_kafka_producer()
     except ConnectionError as e:
@@ -44,13 +36,13 @@ def main():
                     log.warning("Found empty row in CSV, skipping.")
                     continue
 
-                prepared_url = _prepare_url(raw_url)
+                prepared_url = normalization_utils.prepare_url(raw_url)
                 
                 if prepared_url in unique_urls:
                     log.warning(f"Duplicate URL found: {prepared_url}, skipping.")
                     continue
                 
-                message = {"url": prepared_url}
+                message = {"url": prepared_url, "contact_url": ""}
                 
                 producer.produce(
                     topic=config.TOPIC_URLS_TO_FETCH,
@@ -64,17 +56,17 @@ def main():
     except FileNotFoundError:
         log.error(f"Input file not found: {config.INPUT_CSV_FILE}")
     except Exception as e:
-        log.error(f"An unexpected error occurred", exc_info=True)
+        log.error(f"An unexpected error occurred.", exc_info=True)
     finally:       
         if producer is not None:
-            log.info("Flushing remaining messages...")
+            log.info("Flushing remaining messages.")
             producer.flush()
 
-    log.info(f"--- URL Producer finished. Sent {urls_sent_count} URLs. ---")
+    log.info(f"Producer finished. Sent {urls_sent_count} URLs.")
 
 if __name__ == "__main__":
     try:
         main()
     finally:
-        log.info("Shutting down logging system...")
+        log.info("Shutting down logging system.")
         logging.shutdown()

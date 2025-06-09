@@ -5,7 +5,9 @@ import logging
 from src.utils.logging_setup import setup_app_logging
 setup_app_logging("CompanyNameDataProducer")
 
-from src.utils import config, kafka_utils, elastic_search_utils as es_utils
+from src.utils import config
+from src.utils import kafka_utils
+from src.utils import normalization_utils
 
 log = logging.getLogger("CompanyNameDataProducer")
 
@@ -13,7 +15,6 @@ def get_best_company_name(row: dict) -> str:
     """
     Selects the best available company name from the CSV row, in order of preference.
     """
-    # TODO: Check if better logic can be applied here.
     legal = row.get("company_legal_name", "").strip()
     commercial = row.get("company_commercial_name", "").strip()
     all_names_str = row.get("company_all_available_names", "").strip()
@@ -40,7 +41,9 @@ def main():
             reader = csv.DictReader(csvfile)
             
             for row in reader:
-                domain = es_utils.get_domain_from_url(row.get("domain", "").strip())
+                raw_url = row.get("domain", "").strip()
+                domain = normalization_utils.get_domain_from_url(raw_url)
+                
                 if not domain:
                     log.warning(f"Skipping row with invalid or missing domain: {row}")
                     continue
@@ -49,9 +52,12 @@ def main():
                 if not company_name:
                     log.warning(f"Skipping row with no company name for domain: {domain}")
                     continue
+                
+                prepared_url = normalization_utils.prepare_url(raw_url)
 
                 message = {
                     "domain": domain,
+                    "url": prepared_url,
                     "company_name": company_name
                 }
                 

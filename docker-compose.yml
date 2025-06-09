@@ -45,11 +45,11 @@ services:
     # This service runs a single command and then exits.
     command: >
       bash -c "
-        echo 'Waiting for Kafka to be ready...' &&
+        echo 'Waiting for Kafka to be ready' &&
         cub kafka-ready -b kafka:29092 1 1 &&
         echo 'Kafka is ready!' &&
         
-        echo 'Attempting to delete topics...' &&
+        echo 'Attempting to delete topics' &&
         kafka-topics --bootstrap-server kafka:29092 --delete --topic urls_to_fetch || true &&
         kafka-topics --bootstrap-server kafka:29092 --delete --topic html_to_process || true &&
         kafka-topics --bootstrap-server kafka:29092 --delete --topic extracted_data || true &&
@@ -59,17 +59,17 @@ services:
         echo 'Waiting for topics to be deleted' &&
         sleep 5 &&
 
-        echo 'Creating topics with correct partition counts...' &&
+        echo 'Creating topics with correct partition counts' &&
         kafka-topics --bootstrap-server kafka:29092 --create --topic urls_to_fetch --partitions 16 --replication-factor 1 &&
         kafka-topics --bootstrap-server kafka:29092 --create --topic html_to_process --partitions 16 --replication-factor 1 &&
         kafka-topics --bootstrap-server kafka:29092 --create --topic extracted_data --partitions 16 --replication-factor 1 &&
         kafka-topics --bootstrap-server kafka:29092 --create --topic log_events --partitions 1 --replication-factor 1 &&
         kafka-topics --bootstrap-server kafka:29092 --create --topic company_name_data --partitions 16 --replication-factor 1 &&
 
-        echo 'KAFKA-INIT: Waiting 2 seconds for topics to register...' &&
+        echo 'KAFKA-INIT: Waiting 2 seconds for topics to register' &&
         sleep 2 &&
         
-        echo 'KAFKA-INIT: Resetting consumer group offsets...' &&
+        echo 'KAFKA-INIT: Resetting consumer group offsets' &&
         kafka-consumer-groups --bootstrap-server kafka:29092 --group fetcher_service_group --topic urls_to_fetch --reset-offsets --to-earliest --execute &&
         kafka-consumer-groups --bootstrap-server kafka:29092 --group extractor_service_group --topic html_to_process --reset-offsets --to-earliest --execute &&
         kafka-consumer-groups --bootstrap-server kafka:29092 --group analytics_service_group --topic log_events --reset-offsets --to-earliest --execute &&

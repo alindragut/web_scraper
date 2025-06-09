@@ -25,12 +25,6 @@ class KafkaLogHandler(logging.Handler):
             self.producer = None
             traceback.print_exc(file=sys.stderr)
 
-    def delivery_report(self, err, msg):
-        """ Called once for each message produced to indicate delivery result. """
-        if err is not None:
-            # Writing to stderr is the only safe fallback here.
-            sys.stderr.write(f"--- KAFKA LOGGING FAILED: {err} ---\n")
-
     def emit(self, record: logging.LogRecord):
         if not self.producer:
             return
@@ -52,13 +46,12 @@ class KafkaLogHandler(logging.Handler):
             # The produce() method is non-blocking.
             self.producer.produce(
                 self.topic,
-                value=json.dumps(log_entry).encode('utf-8'),
-                callback=self.delivery_report
+                value=json.dumps(log_entry).encode('utf-8')
             )
             # We poll to allow delivery reports to be served.
             self.producer.poll(0)
         except Exception as e:
-            sys.stderr.write(f"--- KAFKA LOGGING FAILED (produce call): {e} ---\n")
+            sys.stderr.write(f"KAFKA LOGGING FAILED (produce call): {e}\n")
             traceback.print_exc(file=sys.stderr)
 
     def close(self):

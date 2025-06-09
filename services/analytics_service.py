@@ -18,7 +18,7 @@ def main():
     messages from the log events and extracted data topics, and generates metrics
     reports at regular intervals.
     """
-    log.info("Starting Analytics Service for continuous monitoring...")
+    log.info("Starting Analytics Service for continuous monitoring")
     
     tracker = PipelineMetricsTracker()
     
