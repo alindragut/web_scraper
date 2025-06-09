@@ -1,16 +1,13 @@
 import csv
 import re
 import logging
-import time
+import json
 
-# Import and call the setup function at the VERY TOP.
-from src.utils.logging_setup import setup_logging
-setup_logging("URLProducer")
+from src.utils.logging_setup import setup_app_logging
+setup_app_logging("URLProducer")
 
-# Now, import the rest of your application modules.
 from src.utils import config, kafka_utils
 
-# Use a specific logger for this service's messages.
 log = logging.getLogger("URLProducer")
 
 def _prepare_url(url_input: str) -> str:
@@ -32,6 +29,7 @@ def main():
         return
 
     urls_sent_count = 0
+    unique_urls = set() # Deduplicate URLs
     try:
         with open(config.INPUT_CSV_FILE, 'r', newline='', encoding='utf-8') as csvfile:
             print("Reading CSV file:", config.INPUT_CSV_FILE)
@@ -47,22 +45,30 @@ def main():
                     continue
 
                 prepared_url = _prepare_url(raw_url)
+                
+                if prepared_url in unique_urls:
+                    log.warning(f"Duplicate URL found: {prepared_url}, skipping.")
+                    continue
+                
                 message = {"url": prepared_url}
                 
-                producer.send(config.TOPIC_URLS_TO_FETCH, value=message)
-                log.info(f"Sent URL to Kafka: {prepared_url}")
+                producer.produce(
+                    topic=config.TOPIC_URLS_TO_FETCH,
+                    value=json.dumps(message).encode('utf-8')
+                )
+                
+                log.info(f"Produced message for URL: {prepared_url}")
+                unique_urls.add(prepared_url)
                 urls_sent_count += 1
 
     except FileNotFoundError:
         log.error(f"Input file not found: {config.INPUT_CSV_FILE}")
     except Exception as e:
         log.error(f"An unexpected error occurred", exc_info=True)
-    finally:
-        if 'producer' in locals() and producer:
+    finally:       
+        if producer is not None:
             log.info("Flushing remaining messages...")
             producer.flush()
-            producer.close()
-            log.info("Producer closed.")
 
     log.info(f"--- URL Producer finished. Sent {urls_sent_count} URLs. ---")
 

@@ -1,42 +1,63 @@
 import asyncio
 import logging
-import os
-from src.utils.logging_setup import configure_basic_logging
+import json
+from src.utils.logging_setup import setup_app_logging
+from confluent_kafka import Producer
 
-# Configure logging like this to ensure it is set up before any other imports that might log messages.
-configure_basic_logging()
-
-# Check if we should log to Kafka
-if os.environ.get("LOG_TO_KAFKA", "false").lower() == "true":
-    try:
-        from src.utils.kafka_log_handler import KafkaLogHandler
-        
-        kafka_handler = KafkaLogHandler(service_name="FetcherService")
-        
-        # Add the handler to the root logger. All loggers will inherit it.
-        logging.getLogger().addHandler(kafka_handler)
-        logging.info("Kafka logging has been ENABLED and added to the root logger.")
-    except Exception as e:
-        logging.critical(f"Failed to initialize KafkaLogHandler. Kafka logging is DISABLED. Error: {e}", exc_info=True)
+setup_app_logging("FetcherService")
 
 from src.utils import config, kafka_utils
 from src.components.web_fetcher import WebFetcher
 
 log = logging.getLogger("FetcherService")
 
+
+async def fetch_and_process(url: str, web_fetcher: WebFetcher, producer: Producer, semaphore: asyncio.Semaphore):
+    """
+    A single, self-contained task to fetch one URL and produce the result.
+    This function is designed to be run concurrently for many URLs.
+    """
+    async with semaphore:
+    # Use a semaphore to limit the number of concurrent fetches
+        log.info(f"Fetching: {url}")
+        try:
+            html_content_bytes = await web_fetcher.fetch_single_page_async(url)
+
+            if html_content_bytes:
+                html_string = html_content_bytes.decode('utf-8', errors='ignore')
+                result_payload = {"url": url, "html_content": html_string}
+                
+                producer.produce(
+                    topic=config.TOPIC_HTMLS_TO_PROCESS,
+                    value=json.dumps(result_payload).encode('utf-8')
+                )
+                log.info(f"Successfully fetched and produced: {url}")
+            else:
+                log.warning(f"Fetch failed for: {url}")
+                
+        except Exception as e:
+            log.error(f"An unexpected error occurred while processing {url}", exc_info=True)
+        finally:
+            # We poll here to allow the producer to send messages in the background
+            # and process delivery callbacks.
+            producer.poll(0)
+
+
 async def main():
     """
     Main async function for the Fetcher Service.
-    Consumes URLs, fetches content, and produces results to the next topic.
+    Consumes URLs in batches and processes them concurrently.
     """
-    log.info("Starting Fetcher Service...")
+    log.info("Starting High-Performance Fetcher Service...")
     web_fetcher = WebFetcher()
     
-    consumer = kafka_utils.get_kafka_consumer(
-        config.TOPIC_URLS_TO_FETCH, config.FETCHER_GROUP_ID
-    )
-    # Get a producer and use a helper to log its connection status
+    semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_FETCHES)
+    
     try:
+        consumer = kafka_utils.get_kafka_consumer(
+            topics=[config.TOPIC_URLS_TO_FETCH], 
+            group_id=config.FETCHER_GROUP_ID
+        )
         producer = kafka_utils.get_kafka_producer()
     except ConnectionError as e:
         log.critical(f"Could not connect to Kafka. Shutting down. Error: {e}")
@@ -44,43 +65,51 @@ async def main():
 
     log.info(f"Waiting for URLs on topic '{config.TOPIC_URLS_TO_FETCH}'...")
     try:
-        for message in consumer:
-            url_data = message.value
-            url = url_data.get("url")
-
-            if not url:
-                log.warning(f"Received message without a URL: {url_data}")
+        while True:
+            messages = consumer.consume(num_messages=config.KAFKA_CONSUMER_BATCH_SIZE, timeout=config.KAFKA_CONSUMER_TIMEOUT_SECONDS)
+            
+            if not messages:
                 continue
 
-            log.info(f"Processing URL: {url}")
-            html_content_bytes = await web_fetcher.fetch_single_page_async(url)
-
-            if html_content_bytes:
-                try:
-                    html_string = html_content_bytes.decode('utf-8', errors='ignore')
-                    result_payload = {"url": url, "html_content": html_string}
-                    producer.send(config.TOPIC_HTML_TO_PROCESS, value=result_payload)
-                    log.info(f"Successfully fetched and produced HTML for {url}")
-                except Exception as e:
-                    log.error(f"Error producing successful fetch for {url}", exc_info=True)
-            else:
-                log.warning(f"Fetch failed for {url}.")
+            log.info(f"Consumed a batch of {len(messages)} messages.")
             
-            producer.flush()
+            tasks = []
+            for msg in messages:
+                if msg.error():
+                    log.error(f"Error in message: {msg.error()}")
+                    continue
+                
+                try:
+                    url_data = json.loads(msg.value().decode('utf-8'))
+                    url = url_data.get("url")
+                    if url:
+                        # Create an asyncio task for each valid URL
+                        task = asyncio.create_task(
+                            fetch_and_process(url, web_fetcher, producer, semaphore)
+                        )
+                        tasks.append(task)
+                    else:
+                        log.warning(f"Received message without a URL: {url_data}")
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    log.error(f"Could not decode message: {e}", exc_info=False)
 
+            if tasks:
+                log.info(f"Processing batch of {len(tasks)} URLs concurrently...")
+                await asyncio.gather(*tasks)
+                consumer.commit(asynchronous=False)
+                log.info("Finished processing batch.")
     except KeyboardInterrupt:
         log.info("Fetcher Service shutting down due to user interrupt...")
     except Exception as e:
         log.critical(f"A critical error occurred in the Fetcher Service main loop", exc_info=True)
     finally:
+        log.info("Closing resources...")
         await web_fetcher.close_session()
+        if producer is not None:
+            log.info("Flushing remaining messages.")
+            producer.flush(10)
         consumer.close()
-        producer.close()
         log.info("Fetcher Service has been shut down.")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        # This will catch a Ctrl+C if it happens during initial setup
-        log.info("Process interrupted by user.")
+    asyncio.run(main())

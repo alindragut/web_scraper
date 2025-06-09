@@ -2,17 +2,17 @@ import asyncio
 import aiohttp
 from typing import Optional
 import logging
+from src.utils import config
 
 # Get a logger instance for this specific module.
 log = logging.getLogger(__name__)
 
 class WebFetcher:
     DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    REQUEST_TIMEOUT_SEC = 15
 
-    def __init__(self, user_agent: Optional[str] = None, request_timeout: Optional[int] = None):
+    def __init__(self, user_agent: Optional[str] = None):
         self.user_agent = user_agent or self.DEFAULT_USER_AGENT
-        self.request_timeout = request_timeout or self.REQUEST_TIMEOUT_SEC
+        self.request_timeout = config.URL_FETCH_TIMEOUT_SECONDS
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:

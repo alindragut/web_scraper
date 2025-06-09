@@ -1,8 +1,9 @@
-import json
 import logging
 # Import and call the setup function at the VERY TOP.
-from src.utils.logging_setup import setup_logging
-setup_logging("LoggingService") # <<< This one call replaces all the old setup logic.
+from src.utils.logging_setup import setup_app_logging, setup_log_file_writer
+
+# Logging setup for the Logging Service's own logs.
+setup_app_logging("LoggingService")
 
 from src.utils import config, kafka_utils
 
@@ -15,10 +16,12 @@ def main():
     """
     log.info("Starting Logging Service...")
     
+    log_file_writer = setup_log_file_writer()
+    
     try:
         consumer = kafka_utils.get_kafka_consumer(
-            topic=config.TOPIC_LOG_EVENTS,
-            group_id="logging_service_group" # Unique group ID
+            topics=[config.TOPIC_LOG_EVENTS],
+            group_id=config.LOGGER_GROUP_ID
         )
     except Exception:
         log.critical("Could not create Kafka consumer. Shutting down.", exc_info=True)
@@ -27,17 +30,26 @@ def main():
     log.info(f"Listening for messages on topic '{config.TOPIC_LOG_EVENTS}'...")
 
     try:
-        for message in consumer:
-            log_data = message.value
-            # Pretty-print the received JSON log
-            print(json.dumps(log_data, indent=2))
+        while True:
+            msg = consumer.poll(config.KAFKA_CONSUMER_TIMEOUT_SECONDS)
+            
+            if msg is None:
+                continue
+            
+            if msg.error():
+                log.error(f"Error in message: {msg.error()}")
+                continue
+            
+            log_message_json = msg.value().decode('utf-8')
+            log_file_writer.info(log_message_json)
+            
+            consumer.commit(asynchronous=False)
     except KeyboardInterrupt:
         log.warning("Logging Service shutting down.")
     except Exception:
         log.critical("An error occurred in the Logging Service consumer loop.", exc_info=True)
     finally:
-        if 'consumer' in locals():
-            consumer.close()
+        consumer.close()
 
 if __name__ == "__main__":
     main()

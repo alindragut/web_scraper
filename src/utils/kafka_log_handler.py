@@ -2,33 +2,34 @@ import logging
 import json
 import traceback
 import sys
-from kafka import KafkaProducer
+import os
+from confluent_kafka import Producer
 
 class KafkaLogHandler(logging.Handler):
     """
-    A custom logging handler that sends log records to a Kafka topic.
-    This handler is self-contained and does not depend on other project utils
-    to avoid circular import issues with the logging system.
+    A custom logging handler that sends log records to a Kafka topic
+    using the robust confluent-kafka-python library.
     """
     def __init__(self, service_name: str, bootstrap_servers: str, topic: str):
         super().__init__()
         self.service_name = service_name
-        self.topic = topic
-        self.formatter = logging.Formatter(
-            '%(asctime)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        self.formatter = logging.Formatter('%(asctime)s', datefmt='%Y-%m-%d %H:%M:%S')
+        self.topic = os.environ.get("KAFKA_LOG_TOPIC", "log_events")
         
+        conf = {
+            'bootstrap.servers': bootstrap_servers,
+        }
         try:
-            self.producer = KafkaProducer(
-                bootstrap_servers=[bootstrap_servers],
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                acks=1,
-                retries=0
-            )
-        except Exception:
+            self.producer = Producer(conf)
+        except Exception as e:
             self.producer = None
             traceback.print_exc(file=sys.stderr)
+
+    def delivery_report(self, err, msg):
+        """ Called once for each message produced to indicate delivery result. """
+        if err is not None:
+            # Writing to stderr is the only safe fallback here.
+            sys.stderr.write(f"--- KAFKA LOGGING FAILED: {err} ---\n")
 
     def emit(self, record: logging.LogRecord):
         if not self.producer:
@@ -45,19 +46,23 @@ class KafkaLogHandler(logging.Handler):
         }
         
         if record.exc_info:
-            log_entry['exception'] = self.formatException(record.exc_info)
+            log_entry['exception'] = self.formatter.formatException(record.exc_info)
 
         try:
-            # Use the topic defined during initialization
-            self.producer.send(self.topic, value=log_entry)
-        except Exception:
-            sys.stderr.write("--- KAFKA LOGGING FAILED ---\n")
+            # The produce() method is non-blocking.
+            self.producer.produce(
+                self.topic,
+                value=json.dumps(log_entry).encode('utf-8'),
+                callback=self.delivery_report
+            )
+            # We poll to allow delivery reports to be served.
+            self.producer.poll(0)
+        except Exception as e:
+            sys.stderr.write(f"--- KAFKA LOGGING FAILED (produce call): {e} ---\n")
             traceback.print_exc(file=sys.stderr)
-            sys.stderr.write(json.dumps(log_entry) + "\n")
-            sys.stderr.write("---------------------------\n")
 
     def close(self):
         if self.producer:
-            self.producer.flush()
-            self.producer.close()
+            # flush() blocks until all outstanding messages are delivered.
+            self.producer.flush(10)  # 10 seconds timeout
         super().close()

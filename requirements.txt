@@ -1,3 +1,7 @@
-kafka-python==2.2.11
+confluent-kafka==2.10.0
 aiohttp==3.12.7
 beautifulsoup4==4.13.4
+elasticsearch==9.0.2
+phonenumbers==9.0.6
+fastapi==0.115.12
+uvicorn[standard]==0.34.3

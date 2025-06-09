@@ -2,11 +2,7 @@ x-base-service: &base-service
   build: .
   environment: &base-environment
     KAFKA_BROKER_URL: kafka:${KAFKA_INTERNAL_PORT}
-    KAFKA_URLS_TOPIC: ${KAFKA_URLS_TOPIC}
-    KAFKA_HTMLS_TOPIC: ${KAFKA_HTMLS_TOPIC}
-    KAFKA_EXTRACTED_DATA_TOPIC: ${KAFKA_EXTRACTED_DATA_TOPIC}
-    KAFKA_LOGS_TOPIC: ${KAFKA_LOGS_TOPIC}
-
+    ELASTICSEARCH_HOSTS: http://elasticsearch:9200
 
 services:
   zookeeper:
@@ -15,7 +11,7 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
   
   kafka:
-    image: confluentinc/cp-kafka:7.3.0
+    image: confluentinc/cp-kafka:7.9.1
     depends_on: 
       - zookeeper
     ports:
@@ -28,7 +24,11 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_CREATE_TOPICS: "${KAFKA_URLS_TOPIC}:1:1,${KAFKA_HTMLS_TOPIC}:1:1,${KAFKA_EXTRACTED_DATA_TOPIC}:1:1,${KAFKA_LOGS_TOPIC}:1:1"
+      # This is not used because we create topics in the kafka-init service, KAFKA_CREATE_TOPICS has proven unreliable.
+      # KAFKA_CREATE_TOPICS: "${KAFKA_URLS_TOPIC}:16:1,${KAFKA_HTMLS_TOPIC}:16:1,${KAFKA_EXTRACTED_DATA_TOPIC}:16:1,${KAFKA_LOGS_TOPIC}:1:1" 
+      KAFKA_MESSAGE_MAX_BYTES: 5242880 # HTMLs can be bigger than the default 1 MB 
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 5242880
+      KAFKA_FETCH_MAX_BYTES: 5242880
     healthcheck:
       test: ["CMD", "cub", "kafka-ready", "-b", "localhost:29092", "1", "1"]
       interval: 10s
@@ -36,38 +36,173 @@ services:
       retries: 5
       start_period: 30s
 
-  logger:
-    <<: *base-service
+  # This service initializes Kafka by deleting and creating the urls_to_fetch topic. Used for development.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.9.1
     depends_on:
       kafka:
         condition: service_healthy
+    # This service runs a single command and then exits.
+    command: >
+      bash -c "
+        echo 'Waiting for Kafka to be ready...' &&
+        cub kafka-ready -b kafka:29092 1 1 &&
+        echo 'Kafka is ready!' &&
+        
+        echo 'Attempting to delete topics...' &&
+        kafka-topics --bootstrap-server kafka:29092 --delete --topic urls_to_fetch || true &&
+        kafka-topics --bootstrap-server kafka:29092 --delete --topic html_to_process || true &&
+        kafka-topics --bootstrap-server kafka:29092 --delete --topic extracted_data || true &&
+        kafka-topics --bootstrap-server kafka:29092 --delete --topic log_events || true &&
+        kafka-topics --bootstrap-server kafka:29092 --delete --topic company_name_data || true &&
+        
+        echo 'Waiting for topics to be deleted' &&
+        sleep 5 &&
+
+        echo 'Creating topics with correct partition counts...' &&
+        kafka-topics --bootstrap-server kafka:29092 --create --topic urls_to_fetch --partitions 16 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --topic html_to_process --partitions 16 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --topic extracted_data --partitions 16 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --topic log_events --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --topic company_name_data --partitions 16 --replication-factor 1 &&
+
+        echo 'KAFKA-INIT: Waiting 2 seconds for topics to register...' &&
+        sleep 2 &&
+        
+        echo 'KAFKA-INIT: Resetting consumer group offsets...' &&
+        kafka-consumer-groups --bootstrap-server kafka:29092 --group fetcher_service_group --topic urls_to_fetch --reset-offsets --to-earliest --execute &&
+        kafka-consumer-groups --bootstrap-server kafka:29092 --group extractor_service_group --topic html_to_process --reset-offsets --to-earliest --execute &&
+        kafka-consumer-groups --bootstrap-server kafka:29092 --group analytics_service_group --topic log_events --reset-offsets --to-earliest --execute &&
+        kafka-consumer-groups --bootstrap-server kafka:29092 --group analytics_service_group --topic extracted_data --reset-offsets --to-earliest --execute &&
+        kafka-consumer-groups --bootstrap-server kafka:29092 --group analytics_service_group --topic company_name_data --reset-offsets --to-earliest --execute &&
+
+        echo 'KAFKA-INIT: Initialization complete.'
+      "
+
+  elasticsearch:
+    image: elasticsearch:9.0.2
+    container_name: es01
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false # Disable security for local development
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # Set heap size for local dev
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  logger:
+    <<: *base-service
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
     environment:
       <<: *base-environment
       LOG_TO_KAFKA: "false" # logger should not log to kafka
+    volumes:
+      - ./logs:/var/log/app
     command: python -m services.logging_service
   
   fetcher:
     <<: *base-service
     depends_on:
-      kafka:
-        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
       logger:
         condition: service_started
     environment:
       <<: *base-environment
       LOG_TO_KAFKA: "true"
     command: python -m services.fetcher_service
-    # To scale, you would use 'docker-compose up --scale fetcher=5'
 
-  url_producer:
+  extractor:
     <<: *base-service
-    restart: no
     depends_on:
-      kafka:
-        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
       logger:
         condition: service_started
     environment:
       <<: *base-environment
       LOG_TO_KAFKA: "true"
-    command: python -m run_url_producer
+    command: python -m services.extractor_service
+
+  storage_service:
+    <<: *base-service
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      extractor:
+        condition: service_started
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "true"
+    command: python -m services.storage_service
+
+  analytics_service:
+    <<: *base-service
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      extractor:
+        condition: service_started
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "true" 
+    command: python -m services.analytics_service
+
+  company_name_data_producer:
+    <<: *base-service
+    # This service runs once and then exits.
+    restart: "no"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      storage_service: 
+        condition: service_started
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "true"
+    command: python -m services.company_name_data_producer
+ 
+  url_producer:
+    <<: *base-service
+    # This service runs once and then exits.
+    restart: no
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      analytics_service:
+        condition: service_started
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "true"
+    command: python -m services.run_url_producer
+
+    # ADD THE NEW API SERVICE
+  api_service:
+    <<: *base-service
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      storage_service: 
+        condition: service_started
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *base-environment
+      LOG_TO_KAFKA: "true"
+    command: uvicorn services.api_service:app --host 0.0.0.0 --port 8000
+
+volumes:
+  es_data:
+    driver: local
