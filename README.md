@@ -59,19 +59,25 @@ graph TD
     end
 
     subgraph "Observability"
-        subgraph "All Services"
-            B; D; F; H; K; M;
-        end -- Logs --> O[t: log_events];
-        G --> P[Analytics Service];
-        O --> P;
+        O[t: log_events] --> P[Analytics Service];
+        G --> P;
     end
-
-    style C fill:#f9f,stroke:#333,stroke-width:2px
-    style E fill:#f9f,stroke:#333,stroke-width:2px
-    style G fill:#f9f,stroke:#333,stroke-width:2px
-    style J fill:#f9f,stroke:#333,stroke-width:2px
-    style L fill:#f9f,stroke:#333,stroke-width:2px
-    style O fill:#f9f,stroke:#333,stroke-width:2px
+    
+    %% Connections for Logging
+    B -- Logs --> O;
+    D -- Logs --> O;
+    F -- Logs --> O;
+    H -- Logs --> O;
+    K -- Logs --> O;
+    M -- Logs --> O;
+    
+    %% Style definitions for Kafka Topics
+    style C fill:#f9f,stroke:#333,stroke-width:2px;
+    style E fill:#f9f,stroke:#333,stroke-width:2px;
+    style G fill:#f9f,stroke:#333,stroke-width:2px;
+    style J fill:#f9f,stroke:#333,stroke-width:2px;
+    style L fill:#f9f,stroke:#333,stroke-width:2px;
+    style O fill:#f9f,stroke:#333,stroke-width:2px;
 ```
 
 ## Architectural Decisions
