@@ -69,15 +69,14 @@ graph TD
     F -- Logs --> O;
     H -- Logs --> O;
     K -- Logs --> O;
-    M -- Logs --> O;
     
     %% Style definitions for Kafka Topics
-    style C fill:#f9f,stroke:#333,stroke-width:2px;
-    style E fill:#f9f,stroke:#333,stroke-width:2px;
-    style G fill:#f9f,stroke:#333,stroke-width:2px;
-    style J fill:#f9f,stroke:#333,stroke-width:2px;
-    style L fill:#f9f,stroke:#333,stroke-width:2px;
-    style O fill:#f9f,stroke:#333,stroke-width:2px;
+    style C fill:#87CEFA,stroke:#333,stroke-width:2px;
+    style E fill:#87CEFA,stroke:#333,stroke-width:2px;
+    style G fill:#87CEFA,stroke:#333,stroke-width:2px;
+    style J fill:#87CEFA,stroke:#333,stroke-width:2px;
+    style L fill:#87CEFA,stroke:#333,stroke-width:2px;
+    style O fill:#87CEFA,stroke:#333,stroke-width:2px;
 ```
 
 ## Architectural Decisions
