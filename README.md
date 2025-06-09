@@ -23,29 +23,29 @@ The pipeline is composed of several microservices communicating through Kafka to
 
 ```mermaid
 graph TD
-    subgraph Input
+    subgraph "Input"
         A[Input CSV file] --> B[URL Producer];
     end
 
     B --> C[t: urls_to_fetch];
 
-    subgraph Fetching Tier 1 (Fast)
+    subgraph "Fetching Tier 1 (Fast)"
         C --> D[Fetcher Simple];
     end
 
     D --> E[t: htmls_to_process];
 
-    subgraph Processing & Routing
+    subgraph "Processing & Routing"
         E --> F[Extractor Service];
     end
 
-    subgraph Data & Storage
+    subgraph "Data & Storage"
         F -- Success --> G[t: extracted_data];
         G --> H[Storage Service];
         H --> I[Elasticsearch];
     end
 
-    subgraph Escalation & Failure Handling
+    subgraph "Escalation & Failure Handling"
         F -- SPA Detected --> J[t: urls_to_fetch_advanced];
         J --> K[Fetcher Advanced];
         K -- Success --> E;
@@ -53,13 +53,13 @@ graph TD
         F -- Advanced Fetch Failed --> L;
     end
     
-    subgraph API
+    subgraph "API"
         M[API Service] <--> I;
         N[User] --> M;
     end
 
-    subgraph Observability
-        subgraph All Services
+    subgraph "Observability"
+        subgraph "All Services"
             B; D; F; H; K; M;
         end -- Logs --> O[t: log_events];
         G --> P[Analytics Service];
