@@ -37,7 +37,7 @@ graph TD
 
     subgraph "Processing & Routing"
         E --> F[Extractor Service];
-        F -- Contact Pages Found --> C; %% Loop back for deeper scraping
+        F -->|Contact Pages Found| C; %% Loop back for deeper scraping
     end
 
     subgraph "Data & Storage"
