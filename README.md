@@ -37,13 +37,13 @@ graph TD
 
     subgraph "Processing & Routing"
         E --> F[Extractor Service];
-        F -->|Contact Pages Found| C; %% Loop back for deeper scraping
+        F -->|Contact Pages Found| C;
     end
 
     subgraph "Data & Storage"
         F -- Success --> G[t: extracted_data];
         G --> H[Storage Service];
-        G2 --> H; %% Storage service also consumes name data
+        G2 --> H;
         H --> I[Elasticsearch];
     end
 
