@@ -1,7 +1,8 @@
 import re
 import logging
 import time
-from collections import Counter
+from collections import Counter, defaultdict
+from src.utils import normalization_utils # NEW: Import normalization utils
 
 # Get a logger instance for this specific module.
 log = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ class PipelineMetricsTracker:
         
         # For Fill Rates
         self.fields_to_check = ['phone_numbers', 'social_media_links', 'addresses']
-        self.field_counts = Counter()
+        self.domain_field_presence = defaultdict(set)
 
     def process_log_event(self, log_entry: dict):
         """Processes a single log entry."""
@@ -42,11 +43,21 @@ class PipelineMetricsTracker:
                     self.fetched_urls.add(fetched_url)
 
     def process_extracted_data(self, record: dict):
-        """Processes a single company record."""
+        """
+        Processes a single company record from the extractor.
+        This method now aggregates findings on a per-domain basis.
+        """
+        url = record.get("url")
+        if not url:
+            return
+        domain = normalization_utils.get_domain_from_url(url)
+        if not domain:
+            return
+
         for field in self.fields_to_check:
             value = record.get(field)
-            if value:
-                self.field_counts[field] += 1
+            if value: # The value is a non-empty list
+                self.domain_field_presence[domain].add(field)
     
     def generate_report(self) -> dict:
         """Calculates and returns a report with Coverage and Fill Rates metrics."""
@@ -56,15 +67,19 @@ class PipelineMetricsTracker:
         coverage_percent = (total_fetched / total_produced * 100) if total_produced > 0 else 0
         
         # Fill Rates
+        final_field_counts = Counter()
+        for domain, found_fields in self.domain_field_presence.items():
+            final_field_counts.update(found_fields)
+
         fill_rates = {}
-        if total_produced > 0:
-            for field in self.fields_to_check:
-                count = self.field_counts.get(field, 0)
-                fill_rate_percent = (count / total_produced * 100)
-                fill_rates[field] = {
-                    "count": count,
-                    "fill_rate_percent": round(fill_rate_percent, 2)
-                }
+
+        for field in self.fields_to_check:
+            count = final_field_counts.get(field, 0)
+            fill_rate_percent = (count / total_produced * 100) if total_produced else 0
+            fill_rates[field] = {
+                "count": count,
+                "fill_rate_percent": round(fill_rate_percent, 2)
+            }
 
         return {
             "report_type": "pipeline_metrics",
@@ -75,7 +90,8 @@ class PipelineMetricsTracker:
                 "coverage_percent": round(coverage_percent, 2)
             },
             "fill_rates": {
-                "total_records_processed": total_produced,
+                "total_domains_processed": len(self.domain_field_presence),
+                "total_domains_input": total_produced,
                 "fields": fill_rates
             }
         }

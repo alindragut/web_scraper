@@ -1,16 +1,14 @@
 # Scalable Web Scraper and Company Data Matching API
 
-This project is a distributed data pipeline built in Python. It takes a list of websites, scrapes them using a multi-tiered fetching strategy, extracts structured company contact information, stores it in Elasticsearch and exposes an API to find the best-matching company profile for a given input.
+This project is a distributed data pipeline built in Python. It takes a list of websites, scrapes them to extract structured company contact information, enriches this data with information from other sources, stores the unified record in Elasticsearch and exposes an API to find the best-matching company profile for a given input.
 
 The entire system is orchestrated with Docker and uses Kafka for robust, asynchronous communication between services.
 
 ## Core Features
 
 -   **Distributed Architecture:** Services are decoupled using Kafka, allowing for independent scaling and resilience.
--   **Multi-Tiered Fetching Strategy:**
-    -   **Simple Fetcher:** A lightweight, high-performance asynchronous fetcher using `aiohttp`.
-    -   **Advanced Fetcher:** A powerful, browser-based fetcher using `selenium-base` to render JavaScript and handle Single-Page Applications (SPAs).
--   **Escalation Logic:** The system automatically detects if a page is a likely SPA (based on content analysis) and escalates it from the simple to the advanced fetcher.
+-   **Deep Site Scraping:** The `Extractor Service` discovers links to contact pages and re-queues them, allowing the `Fetcher` to scrape deeper into a website to find the most valuable data.
+-   **Data Enrichment from Multiple Sources:** The system merges data from multiple streams. It combines data scraped from websites with supplementary data (like official company names) provided via a separate CSV, creating a more complete and accurate final record.
 -   **Robust Data Storage & Search:** Uses Elasticsearch to store company records and provide powerful full-text search and matching capabilities.
 -   **Data Normalization:** Enriches the stored data with normalized fields (E.164 for phone numbers, clean domains, social media profile IDs) to achieve a high match rate.
 -   **Smart Matching API:** A FastAPI endpoint that uses a weighted, multi-field query to find the single best-matching company profile.
@@ -19,40 +17,36 @@ The entire system is orchestrated with Docker and uses Kafka for robust, asynchr
 
 ## System Architecture
 
-The pipeline is composed of several microservices communicating through Kafka topics. The `Extractor Service` acts as the central brain for routing and escalation.
+The pipeline is composed of several microservices communicating through Kafka topics. The `Storage Service` acts as the point of data unification before persistence.
 
 ```mermaid
 graph TD
     subgraph "Input"
-        A[Input CSV file] --> B[URL Producer];
+        A[Websites CSV] --> B[URL Producer];
+        A2[Company Names CSV] --> B2[CompanyName Producer];
     end
 
     B --> C[t: urls_to_fetch];
+    B2 --> G2[t: company_name_data];
 
-    subgraph "Fetching Tier 1 (Fast)"
-        C --> D[Fetcher Simple];
+    subgraph "Fetching"
+        C --> D[Fetcher Service];
     end
 
     D --> E[t: htmls_to_process];
 
     subgraph "Processing & Routing"
         E --> F[Extractor Service];
+        F -- Contact Pages Found --> C; %% Loop back for deeper scraping
     end
 
     subgraph "Data & Storage"
         F -- Success --> G[t: extracted_data];
         G --> H[Storage Service];
+        G2 --> H; %% Storage service also consumes name data
         H --> I[Elasticsearch];
     end
 
-    subgraph "Escalation & Failure Handling"
-        F -- SPA Detected --> J[t: urls_to_fetch_advanced];
-        J --> K[Fetcher Advanced];
-        K -- Success --> E;
-        K -- Network Error --> L[t: failed_urls_dlq];
-        F -- Advanced Fetch Failed --> L;
-    end
-    
     subgraph "API"
         M[API Service] <--> I;
         N[User] --> M;
@@ -65,44 +59,38 @@ graph TD
     
     %% Connections for Logging
     B -- Logs --> O;
+    B2 -- Logs --> O;
     D -- Logs --> O;
     F -- Logs --> O;
     H -- Logs --> O;
-    K -- Logs --> O;
     
     %% Style definitions for Kafka Topics
     style C fill:#FF7F50,stroke:#333,stroke-width:2px;
     style E fill:#FF7F50,stroke:#333,stroke-width:2px;
     style G fill:#FF7F50,stroke:#333,stroke-width:2px;
-    style J fill:#FF7F50,stroke:#333,stroke-width:2px;
-    style L fill:#FF7F50,stroke:#333,stroke-width:2px;
+    style G2 fill:#FF7F50,stroke:#333,stroke-width:2px;
     style O fill:#FF7F50,stroke:#333,stroke-width:2px;
 ```
 
 ## Architectural Decisions
 
-The architecture of this project was deliberately chosen to prioritize scalability, resilience, and maintainability.
+The architecture of this project was chosen to prioritize scalability, resilience and maintainability.
 
 -   **Why Kafka? (Decoupling and Asynchronicity)**
     -   Kafka acts as a durable buffer between services. If the `ExtractorService` crashes, the `FetcherService` can continue to produce messages without data loss. Once the `ExtractorService` restarts, it will resume processing from where it left off. This is crucial for a long-running scraping job.
-    -   Each service is a separate consumer group. If fetching becomes a bottleneck, we can scale up the number of `fetcher` service containers without touching any other part of the system. The same applies to the `extractor`, `storage`, or any other service.
-    -  If the `ExtractorService` is slower than the `FetcherService` for example, messages will simply accumulate in the `htmls_to_process` topic without overwhelming the extractor service's memory.
+    -   Each service can be scaled independently. If fetching becomes a bottleneck, we can scale up the number of `fetcher` service containers without touching any other part of the system.
+    -   It prevents backpressure. If the `ExtractorService` is slower than the `FetcherService`, messages will simply accumulate in the `htmls_to_process` topic without overwhelming the extractor service's memory.
 
--   **Why a Multi-Tiered Fetching Strategy? (Efficiency and Capability)**
-    -   A simple, asynchronous `aiohttp` fetch that is fast and resource-efficient. A full browser fetch with Selenium is slow, CPU-intensive, and memory-heavy. By using the simple fetcher as the first line of attack, we process the vast majority of "easy" websites cheaply.
-    -   We only use the expensive "advanced" fetcher when absolutely necessary, as determined by the `ExtractorService`. This targeted approach provides the power to handle complex JavaScript-driven sites without paying the performance penalty for every single URL.
+-   **Why is the contact page logic in the Extractor? (Single Responsibility & Centralized Logic)**
+    -   Separation of concerns - the fetcher's job is to fetch HTML pages; the extractor's job is to understand HTML content.
 
--   **Why is the escalation logic in the Extractor? (Single Responsibility & Centralized Logic)**
-    -   By moving the escalation logic from the fetcher to the extractor, we adhere to the Single Responsibility Principle. The fetcher's job is just to fetch; the extractor's job is to understand HTML.
-    -   The `ExtractorService` is the only service that can definitively say, "This HTML is empty and contains no useful data." Placing the re-queueing logic here is more accurate and centralizes the complex decision-making process.
+-   **Why a dedicated Storage Service? (Data Merging and Abstraction)**
+    -   This service's main responsibility is to communicate with the persistent storage layer (Elasticsearch). It handles database-specific logic like index creation, schema mapping and update/insert (upsert) operations. This decouples all other services from the implementation details of the database.
+    -   This service also acts as a **data fusion point**. It consumes from both the `extracted_data` topic (from the scraper) and the `company_name_data` topic (from a CSV) and merges them into a single company record in Elasticsearch using the domain as the primary key. This design makes it easy to plug in new data sources in the future.
 
--   **Why a Storage Service? (Merging data from multiple streams)**
-    -   This service's sole responsibility is to communicate with the persistent storage layer (Elasticsearch). It handles specific database logic like index creation and schema mapping. This decouples the `ExtractorService` from the implementation details of the database. If we decided to switch to a different database, only the `StorageService` would need to change.
-    -   This design is powerful for future enhancements. Its role would be to **merge** different data streams into a single company record before saving the final document. This makes the architecture a plug-and-play system for future data sources.
-
--   **Why Elasticsearch? (Storage to Search)**
+-   **Why Elasticsearch? (From Storage to Search)**
     -   For the final goal of matching company profiles, a standard relational database is insufficient.
-    -   Elasticsearch's powerful text analysis, inverted index, and relevance scoring are purpose-built for this kind of search and matching problem, providing both the speed and the capabilities required for a high match rate.
+    -   Elasticsearch's powerful text analysis, inverted index and relevance scoring are purpose-built for these kind of fuzzy search and matching problems, providing both the speed and the capabilities required for a high match rate.
 
 ## Technology Stack
 
@@ -110,7 +98,7 @@ The architecture of this project was deliberately chosen to prioritize scalabili
 -   **Messaging Queue:** Apache Kafka
 -   **Database/Search Index:** Elasticsearch
 -   **API Framework:** FastAPI
--   **Web Fetching:** `aiohttp` (simple), `selenium-base` (advanced)
+-   **Web Fetching:** `aiohttp`
 -   **Orchestration:** Docker & Docker Compose
 -   **Key Python Libraries:** `confluent-kafka`, `elasticsearch-py`, `phonenumbers`, `beautifulsoup4`, `uvicorn`.
 
@@ -131,8 +119,8 @@ The architecture of this project was deliberately chosen to prioritize scalabili
     ```
 
 2.  **Prepare Input Data:**
-    Place the list of websites to be scraped in the `data/sample-websites.csv` file. It must have a header row with at least a `domain` column.
-    Place the list company names matched to domains in the `data/sample-websites-company-names.csv` file. The header row contains `domain`, `company_commercial_name`,`company_legal_name` and `company_all_available_names` columns.
+    -   Place the list of websites to be scraped in `data/sample-websites.csv`. It must have a header row with a `domain` column.
+    -   Place the list of known company names in `data/sample-websites-company-names.csv`. The header row must contain `domain`, `company_commercial_name`, `company_legal_name` and `company_all_available_names`.
 
 3.  **Install Python dependencies:**
     These are required for running the local API testing script.
@@ -147,7 +135,7 @@ The architecture of this project was deliberately chosen to prioritize scalabili
     ```bash
     docker-compose up --build
     ```
-    This will start all services, including Kafka, Elasticsearch, and the application microservices, in the foreground.
+    This will start all services, including Kafka, Elasticsearch and the application microservices, in the foreground.
 
 2.  **To run in detached mode (in the background):**
     ```bash
@@ -161,9 +149,9 @@ The architecture of this project was deliberately chosen to prioritize scalabili
 
 ## Usage
 
-### Kicking off the Scraping Process
+### Kicking off the Data Ingestion Process
 
-The `url_producer` service is configured to run once and then exit. It reads the URLs from `data/sample-websites.csv` and seeds the pipeline. The scraping and processing will begin automatically as soon as the services are up.
+The `url_producer` and `company_name_data_producer` services are configured to run once upon startup and then exit. They read from their respective CSV files in the `data/` directory and seed the pipeline. The scraping and processing will begin automatically as soon as the services are up.
 
 ### Using the Matching API
 
@@ -175,7 +163,7 @@ FastAPI provides automatic, interactive API documentation. Once the services are
 
 **[http://localhost:8000/docs](http://localhost:8000/docs)**
 
-You can see the endpoint, its required schema, and test it directly from your browser.
+You can see the endpoint, its required schema and test it directly from your browser.
 
 #### `POST /match` Endpoint
 
@@ -211,7 +199,7 @@ curl -X POST "http://localhost:8000/match" \
 
 A script is provided to test the match rate of the API against a sample input file.
 
-1.  **Prepare Test Data:** Ensure the `data/api_test_data.csv` file exists.
+1.  **Prepare Test Data:** Ensure the `data/API-input-sample.csv` file exists.
 2.  **Run the Test Script:** Make sure the Docker stack is running, then execute the script in a separate terminal.
     ```bash
     python test_api_script.py
@@ -221,26 +209,70 @@ A script is provided to test the match rate of the API against a sample input fi
     ```bash
     2025-06-09 12:55:07 - INFO - Match Rate Report
     2025-06-09 12:55:07 - INFO - Total Test Cases:      32
-    2025-06-09 12:55:07 - INFO - Successful Matches:    31
-    2025-06-09 12:55:07 - INFO - Failed/No Matches:     1
-    2025-06-09 12:55:07 - INFO - Overall Match Rate:  96.88%
+    2025-06-09 12:55:07 - INFO - Successful Matches:    32
+    2025-06-09 12:55:07 - INFO - Failed/No Matches:     0
+    2025-06-09 12:55:07 - INFO - Overall Match Rate:  100.00%
     ```
 
-## Benchmarks
+## Performance Benchmarks
 
+The following benchmarks were recorded to measure the pipeline's throughput and data acquisition effectiveness. Performance was measured on a system with the specified configuration, processing the full sample dataset of 997 unique domains.
+
+### Test Environment
+
+*   **Hardware:** Desktop PC (Ryzen 9 5900X, 32GB DDR4 RAM, NVMe SSD)
+*   **Software:** Docker Desktop on Windows 10
+*   **Pipeline Scale:** `docker compose up --build -d --scale fetcher-simple=8`
+*   **Key Config:** `MAX_CONCURRENT_FETCHES=256`, `KAFKA_CONSUMER_BATCH_SIZE=256`, `URL_FETCH_TIMEOUT_SECONDS=15`
+
+*Note: Runtimes and throughput are heavily dependent on network conditions, responsiveness of the target websites and the parameters showcased key configs.*
+
+### Throughput
+
+*   **End-to-End Pipeline Runtime:** Approximately **50 seconds** to process all 997 domains.
+    *   This measures the time from the first URL being produced to the final record being processed by the storage service. The primary bottleneck is the `Fetcher` service, which is constrained by network I/O and server response times.
+
+### Data Quality Metrics
+
+These metrics are generated by the `AnalyticsService` and indicate the pipeline's overall success in acquiring and structuring data.
+
+*   **Fetch Coverage:** **67.2%**
+    *   *Definition:* The percentage of input domains for which the `Fetcher` successfully downloaded HTML content (670 out of 997). Failures are typically due to network timeouts, DNS errors, or server-side issues (e.g., 4xx/5xx status codes).
+
+*   **Data Fill Rates:**
+    *   *Definition:* The percentage of *total input domains* for which at least one instance of a specific data type was successfully extracted.
+    *   **Phone Numbers:** **42.8%**
+    *   **Social Media Links:** **35.4%**
+    *   **Addresses:** **22.5%**
 
 ## Future Work & Potential Improvements
 
 This project provides a solid foundation, but there are many ways it could be extended and improved:
 
--   **Proxy Integration & Rotation:** The Fetchers could integrate a proxy rotation. This would make the system far more robust against IP blocks.
+-   **Proxy Integration & Rotation:** The Fetcher could integrate a proxy rotation service. This would make the system far more robust against IP blocks and rate limiting for large-scale scraping.
 
--   **Kubernetes:** Solid choice to make the project truly production ready.
+-   **Advanced Fetching Tier:** For websites that heavily rely on JavaScript to render content, a second, more powerful fetching tier could be added using a browser automation tool like `selenium` or `playwright`. Logic could be added to the `Extractor` to escalate fetching to this tier if the initial HTML is sparse.
 
--   **Enhanced Data Extraction:** Current data extraction regex patterns still have bugs. It is very hard to create a perfect heuristic here, so enhancements in this area are plenty.
+-   **Kubernetes:** For a production-ready deployment, the application could be migrated from Docker Compose to Kubernetes for better orchestration, scaling and self-healing capabilities.
 
--   **Unit Tests:** The project has no unit tests. This is deliberate, as the focus was mostly on functionality.
+-   **Enhanced Data Extraction:** Current data extraction relies on regular expressions, which can be brittle. This could be improved by using more advanced techniques, including NLP models or third-party extraction services.
 
--   **CI/CD Pipeline:** Implement a continuous integration and deployment pipeline (e.g., using GitHub Actions) to automate testing, building, and deploying Docker images to a container registry.
+-   **Unit Tests:** The project currently lacks a comprehensive unit test suite. Adding unit tests for individual components (especially normalization and extraction logic) would improve reliability and make future development safer.
 
--   **Advanced Monitoring and Alerting:** While the `AnalyticsService` provides basic metrics, integrating with a monitoring stack like Prometheus and Grafana would provide deeper insights into pipeline performance.
+-   **CI/CD Pipeline:** Implement a continuous integration and deployment pipeline (e.g., using GitHub Actions) to automate testing, building and deploying Docker images to a container registry.
+
+-   **Advanced Monitoring and Alerting:** While the `AnalyticsService` provides basic metrics, integrating with a monitoring stack like Prometheus and Grafana would provide deeper insights into pipeline performance, latency and error rates, with automated alerting.
+
+## Bonus Task - Strategy for Measuring API Match Accuracy
+
+A multi-step accuracy measurement system:
+
+1. **Heuristic based accuracy:** Create a scoring system based on the strength of the signal present in the resulting match. For example:
+* Normalized phone number match: +50 points
+* Domain match: +40 points
+* Normalized social media profile match: +30 points
+
+2. **Manual sampling of matches:** At a certain time interval, randomly sample a small number of match results from the logs. Label these results manually, calculate the Confusion Matrix, adapt the heuristic based accuracy if needed and add the labeled
+results to a dataset.
+
+3. **Supervised learning ML model:** Use the created dataset to train a supervised ML model whose purpose is to classify if the results matches the input or not.

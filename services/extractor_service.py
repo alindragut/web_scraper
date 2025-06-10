@@ -12,7 +12,7 @@ log = logging.getLogger("ExtractorService")
 def main():
     """
     Main function for the Extractor Service.
-    Consumes HTML content, extracts structured data, and produces the result.
+    Consumes HTML content, extracts structured data and produces the result.
     """
     log.info("Starting Extractor Service")
     html_extractor = HtmlDataExtractor()

@@ -3,7 +3,7 @@ import os
 # Kafka general configuration
 KAFKA_BROKER_URL = os.environ.get("KAFKA_BROKER_URL", "localhost:9092")
 KAFKA_CONSUMER_TIMEOUT_SECONDS = float(os.environ.get("KAFKA_CONSUMER_TIMEOUT", "1.0"))
-KAFKA_CONSUMER_BATCH_SIZE = int(os.environ.get("KAFKA_CONSUMER_BATCH_SIZE", "1024"))
+KAFKA_CONSUMER_BATCH_SIZE = int(os.environ.get("KAFKA_CONSUMER_BATCH_SIZE", "256"))
 
 # Elasticsearch general configuration
 ELASTICSEARCH_HOSTS = os.environ.get("ELASTICSEARCH_HOSTS", "http://localhost:9200")

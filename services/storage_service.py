@@ -11,7 +11,7 @@ log = logging.getLogger("StorageService")
 def main():
     """
     Main function for the Storage Service.
-    Consumes extracted company data, normalizes it, and stores it in Elasticsearch.
+    Consumes extracted company data, normalizes it and stores it in Elasticsearch.
     """
     log.info("Starting Storage Service")
 
